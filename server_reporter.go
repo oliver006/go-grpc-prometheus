@@ -54,6 +54,14 @@ var (
 			Help:      "Total number of gRPC stream messages sent by the server.",
 		}, []string{"grpc_type", "grpc_service", "grpc_method"})
 
+	serverHandledDurationsSummary = prom.NewSummaryVec(
+		prom.SummaryOpts{
+			Namespace: "grpc",
+			Subsystem: "server",
+			Name:      "handled_duration_microseconds",
+			Help:      "The GRPC request latencies in microseconds.",
+		}, []string{"grpc_type", "grpc_service", "grpc_method", "grpc_code"})
+
 	serverHandledHistogramEnabled = false
 	serverHandledHistogramOpts    = prom.HistogramOpts{
 		Namespace: "grpc",
@@ -70,6 +78,7 @@ func init() {
 	prom.MustRegister(serverHandledCounter)
 	prom.MustRegister(serverStreamMsgReceived)
 	prom.MustRegister(serverStreamMsgSent)
+	prom.MustRegister(serverHandledDurationsSummary)
 }
 
 type HistogramOption func(*prom.HistogramOpts)
@@ -104,9 +113,7 @@ type serverReporter struct {
 
 func newServerReporter(rpcType grpcType, fullMethod string) *serverReporter {
 	r := &serverReporter{rpcType: rpcType}
-	if serverHandledHistogramEnabled {
-		r.startTime = time.Now()
-	}
+	r.startTime = time.Now()
 	r.serviceName, r.methodName = splitMethodName(fullMethod)
 	serverStartedCounter.WithLabelValues(string(r.rpcType), r.serviceName, r.methodName).Inc()
 	return r
@@ -121,10 +128,12 @@ func (r *serverReporter) SentMessage() {
 }
 
 func (r *serverReporter) Handled(code codes.Code) {
+	elapsed := time.Since(r.startTime)
 	serverHandledCounter.WithLabelValues(string(r.rpcType), r.serviceName, r.methodName, code.String()).Inc()
 	if serverHandledHistogramEnabled {
-		serverHandledHistogram.WithLabelValues(string(r.rpcType), r.serviceName, r.methodName).Observe(time.Since(r.startTime).Seconds())
+		serverHandledHistogram.WithLabelValues(string(r.rpcType), r.serviceName, r.methodName).Observe(elapsed.Seconds())
 	}
+	serverHandledDurationsSummary.WithLabelValues(string(r.rpcType), r.serviceName, r.methodName, code.String()).Observe(float64(elapsed) / float64(time.Microsecond))
 }
 
 // preRegisterMethod is invoked on Register of a Server, allowing all gRPC services labels to be pre-populated.
@@ -140,6 +149,7 @@ func preRegisterMethod(serviceName string, mInfo *grpc.MethodInfo) {
 	}
 	for _, code := range allCodes {
 		serverHandledCounter.GetMetricWithLabelValues(methodType, serviceName, methodName, code.String())
+		serverHandledDurationsSummary.GetMetricWithLabelValues(methodType, serviceName, methodName, code.String())
 	}
 }
 
